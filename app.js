@@ -481,42 +481,92 @@ async function openLightboxAt(idx) {
   _preLightboxFocus = document.activeElement;
   state.lightbox = { open: true, index: idx };
   const file = state.filteredFiles[idx];
-  DOM.lightbox.hidden = false; DOM.lightbox.setAttribute('aria-hidden', 'false');
+
+  // Reveal lightbox: remove inert FIRST so no transition conflict occurs,
+  // then clear aria-hidden before any child element receives focus.
+  DOM.lightbox.removeAttribute('inert');
+  DOM.lightbox.hidden = false;
+  DOM.lightbox.setAttribute('aria-hidden', 'false');
   document.body.style.overflow = 'hidden';
+
   DOM.lightboxStage.innerHTML = '<div style="padding:48px;display:flex;align-items:center;justify-content:center"><div class="loader"><div class="loader-ring"></div></div></div>';
   DOM.lightboxFilename.textContent = file.name;
-  DOM.lightboxDetails.textContent = file.type.toUpperCase() + ' - ' + formatBytes(file.size) + ' - ' + formatDate(file.modifiedTime);
-  DOM.lightboxOpenDrive.href = file.driveUrl || '#';
-  DOM.btnLightboxPrev.disabled = idx === 0;
-  DOM.btnLightboxNext.disabled = idx === state.filteredFiles.length - 1;
+  DOM.lightboxDetails.textContent  = file.type.toUpperCase() + ' \u2014 ' + formatBytes(file.size) + ' \u2014 ' + formatDate(file.modifiedTime);
+  DOM.lightboxOpenDrive.href        = file.driveUrl || '#';
+  DOM.btnLightboxPrev.disabled      = idx === 0;
+  DOM.btnLightboxNext.disabled      = idx === state.filteredFiles.length - 1;
+
+  if (DOM.lightboxZoomControls) DOM.lightboxZoomControls.hidden = file.type !== 'image';
+  if (DOM.btnLightboxPrint)     DOM.btnLightboxPrint.hidden     = file.type !== 'image';
+
+  ZoomController.unmount();
+  if (_currentBlobUrl) { BlobRegistry.revoke(_currentBlobUrl); _currentBlobUrl = ''; }
+
   try {
-    const blobUrl = await createMediaBlobUrl(file.id);
+    const blobUrl = await streamDriveFile(file.id, file.mime);
+    _currentBlobUrl = blobUrl;
+    DOM.lightboxStage.innerHTML = '';
+
     if (file.type === 'video') {
       const v = el('video', { controls: '', playsinline: '', autoplay: '', 'aria-label': file.name });
       v.appendChild(el('source', { src: blobUrl, type: file.mime }));
-      v.addEventListener('emptied', () => URL.revokeObjectURL(blobUrl), { once: true });
-      DOM.lightboxStage.innerHTML = ''; DOM.lightboxStage.appendChild(v);
+      DOM.lightboxStage.appendChild(v);
     } else {
-      const img = el('img', { src: blobUrl, alt: file.name });
-      img.addEventListener('load', () => URL.revokeObjectURL(blobUrl), { once: true });
-      DOM.lightboxStage.innerHTML = ''; DOM.lightboxStage.appendChild(img);
+      const wrapper = el('div', { className: 'zoom-wrapper', 'aria-label': 'Zoom: scroll to zoom, drag to pan, double-click to reset' });
+      const img = el('img', { src: blobUrl, alt: file.name, draggable: 'false' });
+      wrapper.appendChild(img);
+      DOM.lightboxStage.appendChild(wrapper);
+      img.addEventListener('load', () => ZoomController.mount(wrapper), { once: true });
     }
+
+    // Move focus into lightbox only after content is in the DOM
     DOM.btnLightboxClose.focus();
   } catch (e) {
+    hideStreamProgress();
     DOM.lightboxStage.innerHTML = '<p style="padding:32px;color:var(--color-error)">Could not load media: ' + sanitiseText(e.message) + '</p>';
   }
 }
 
 function closeLightbox() {
+  /**
+   * WAI-ARIA COMPLIANT CLOSE SEQUENCE
+   * ==================================
+   * VIOLATION FIXED: "Blocked aria-hidden on an element because its
+   * descendant retained focus."
+   *
+   * Root cause: setting aria-hidden="true" while btn-lightbox-close still
+   * holds focus violates the WAI-ARIA spec (https://w3c.github.io/aria/#aria-hidden).
+   *
+   * Correct sequence:
+   *   Step 1 — Move focus OUT of lightbox FIRST (to pre-open element or body)
+   *   Step 2 — THEN apply inert + aria-hidden="true" + hidden=true
+   *
+   * The `inert` attribute (Chrome's own recommendation) atomically removes
+   * both keyboard focus and AT-exposure, preventing race conditions.
+   */
+
+  // Step 1: Restore focus BEFORE hiding. This is the critical fix.
+  if (_preLightboxFocus && typeof _preLightboxFocus.focus === 'function') {
+    _preLightboxFocus.focus();
+    _preLightboxFocus = null;
+  } else {
+    document.body.focus();  // Safety fallback
+  }
+
+  // Step 2: Now that focus is outside the lightbox, it is safe to hide it.
+  DOM.lightbox.setAttribute('inert', '');        // Prevents programmatic focus() into subtree
+  DOM.lightbox.setAttribute('aria-hidden', 'true'); // Removes from accessibility tree
+  DOM.lightbox.hidden = true;                    // Removes from layout and rendering
+
+  // Step 3: Release media resources
   const v = DOM.lightboxStage.querySelector('video');
-  if (v) { v.pause(); const s = v.querySelector('source')?.src; if (s?.startsWith('blob:')) URL.revokeObjectURL(s); }
-  const img = DOM.lightboxStage.querySelector('img');
-  if (img?.src?.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  if (v) v.pause();
+  ZoomController.unmount();
+  ZoomController.reset();
+  if (_currentBlobUrl) { BlobRegistry.revoke(_currentBlobUrl); _currentBlobUrl = ''; }
   DOM.lightboxStage.innerHTML = '';
-  DOM.lightbox.hidden = true; DOM.lightbox.setAttribute('aria-hidden', 'true');
   document.body.style.overflow = '';
   state.lightbox = { open: false, index: -1 };
-  if (_preLightboxFocus) { _preLightboxFocus.focus(); _preLightboxFocus = null; }
 }
 
 // INFINITE SCROLL
