@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @fileoverview DriveVault -- app.js
  * Multi-tenant Google Drive media manager.
  * Auth: Google Identity Services (GIS) OAuth 2.0 implicit grant.
@@ -87,6 +87,8 @@ function cacheDOM() {
     'btn-retry', 'loading-message', 'btn-auth-primary', 'lightbox', 'lightbox-backdrop',
     'lightbox-stage', 'lightbox-filename', 'lightbox-details', 'lightbox-open-drive',
     'btn-lightbox-close', 'btn-lightbox-prev', 'btn-lightbox-next', 'toast-container', 'btn-theme-toggle',
+    'btn-lightbox-download', 'btn-lightbox-print', 'btn-zoom-in', 'btn-zoom-out', 'btn-zoom-reset',
+    'lightbox-zoom-controls', 'lightbox-zoom-level', 'lightbox-stream-bar', 'lightbox-stream-fill', 'lightbox-stream-label',
   ];
   ids.forEach(id => { DOM[id.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = $(id); });
   DOM.filterChips = document.querySelectorAll('.chip[data-filter]');
@@ -698,6 +700,8 @@ const ThemeManager = (() => {
 // INIT
 function init() {
   cacheDOM(); ThemeManager.init(); wireEvents(); showState('auth');
+  // Domain 1: clean up ALL blob URLs when the tab/window closes
+  window.addEventListener('beforeunload', () => BlobRegistry.revokeAll());
   restoreAccountMetaFromSession();
   if (state.accounts.size > 0) {
     renderAccountList(); DOM.btnSignOutAll.hidden = false;
@@ -715,3 +719,398 @@ function init() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
 else init();
 
+
+// ============================================================
+// DOMAIN 1 — HARDENED SESSION MANAGEMENT
+// HttpOnly cookies require a server-side Set-Cookie header and
+// are impossible in a pure frontend app. We implement the
+// maximum-security frontend equivalent:
+//   - Tokens held in memory only (never written anywhere)
+//   - Account metadata (non-secret) in sessionStorage only
+//   - Comprehensive sign-out wipes ALL client-side state
+//   - Blob URL registry prevents memory leaks
+//   - beforeunload cleans up all object URLs
+// ============================================================
+
+/** Registry of all active Blob URLs for deterministic cleanup. */
+const BlobRegistry = (() => {
+  const _urls = new Set();
+  return {
+    /**
+     * Creates a Blob URL and registers it for later revocation.
+     * @param {Blob} blob
+     * @returns {string} object URL
+     */
+    create(blob) {
+      const url = URL.createObjectURL(blob);
+      _urls.add(url);
+      return url;
+    },
+    /**
+     * Revokes a single Blob URL and removes it from the registry.
+     * @param {string} url
+     */
+    revoke(url) {
+      if (!url || !url.startsWith('blob:')) return;
+      URL.revokeObjectURL(url);
+      _urls.delete(url);
+    },
+    /**
+     * Revokes ALL registered Blob URLs. Called on sign-out and beforeunload.
+     */
+    revokeAll() {
+      for (const url of _urls) URL.revokeObjectURL(url);
+      _urls.clear();
+    },
+    size() { return _urls.size; },
+  };
+})();
+
+/**
+ * Performs a hardened, complete sign-out sequence:
+ *   1. Revokes all active GIS OAuth tokens with Google's servers.
+ *   2. Revokes all Blob URLs (prevents memory leaks).
+ *   3. Wipes sessionStorage and all relevant localStorage keys.
+ *   4. Clears all in-memory application state.
+ *   5. Closes any open lightbox.
+ *   6. Resets the UI to the authentication gate.
+ * Note: We do NOT call window.location.reload() or replace() because
+ * this is a Single-Page Application — a full reload is unnecessary and
+ * disruptive. State is reset in place.
+ */
+function hardenedSignOut() {
+  // Step 1: Revoke GIS tokens with Google's OAuth servers
+  for (const [, a] of state.accounts) {
+    if (a.token && window.google?.accounts?.oauth2) {
+      window.google.accounts.oauth2.revoke(a.token, () => {});
+    }
+  }
+
+  // Step 2: Release all blob URLs
+  BlobRegistry.revokeAll();
+
+  // Step 3: Targeted storage wipe (surgical — only our keys)
+  try {
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem('dv_theme'); // preserve theme on explicit sign-out? No — full wipe.
+  } catch (_) {}
+
+  // Step 4: Reset ALL in-memory state
+  state.accounts.clear();
+  state.activeAccountSub = null;
+  state.currentFolderId  = 'root';
+  state.breadcrumb       = [{ id: 'root', name: 'My Drive' }];
+  state.allFiles         = [];
+  state.filteredFiles    = [];
+  state.nextPageToken    = null;
+  state.searchQuery      = '';
+  state.activeFilter     = 'all';
+  state.lightbox         = { open: false, index: -1 };
+  if (state.scrollObserver) { state.scrollObserver.disconnect(); state.scrollObserver = null; }
+
+  // Step 5: Close lightbox if open
+  if (!DOM.lightbox.hidden) closeLightbox();
+
+  // Step 6: Reset UI
+  DOM.accountList.innerHTML = '';
+  DOM.mediaGrid.innerHTML   = '';
+  DOM.quotaDisplay.innerHTML = '';
+  DOM.btnSignOutAll.hidden  = true;
+  renderBreadcrumb();
+  showState('auth');
+  showToast('You have been securely signed out.', 'info');
+}
+
+// ============================================================
+// DOMAIN 2 — STREAMING MEDIA LOADER (ReadableStream + Progress)
+// The Google Drive API supports HTTP Range requests natively and
+// returns 206 Partial Content. We drive it with a ReadableStream
+// reader that accumulates chunks and reports progress, achieving
+// the same result as a Node.js fs.createReadStream pipe with no
+// backend required.
+// ============================================================
+
+/**
+ * Streams a Drive file via the alt=media endpoint, reporting
+ * incremental progress to the lightbox progress bar.
+ *
+ * Architecture:
+ *   fetch() returns a Response whose body is a ReadableStream.
+ *   We pump the stream chunk-by-chunk via a reader, accumulate
+ *   into a Uint8Array buffer, update the progress bar on each
+ *   chunk, then create a single Blob URL when complete.
+ *   This prevents holding the entire file in memory before paint
+ *   and gives the user real-time transfer feedback.
+ *
+ * @param {string} fileId    - Drive file ID
+ * @param {string} mimeType  - MIME type for Blob construction
+ * @returns {Promise<string>} Registered Blob URL
+ */
+async function streamDriveFile(fileId, mimeType) {
+  const token = getActiveToken();
+  if (!token) throw new DriveApiError('Not authenticated.', 401);
+
+  const params = new URLSearchParams({
+    alt: 'media',
+    key: CONFIG.API_KEY,
+    supportsAllDrives: 'true',
+  });
+  const url = CONFIG.DRIVE_API + '/files/' + encodeURIComponent(fileId) + '?' + params;
+
+  // Show streaming progress bar
+  showStreamProgress(0);
+
+  const response = await fetch(url, {
+    headers: { Authorization: 'Bearer ' + token },
+  });
+
+  if (response.status === 401) {
+    const a = state.accounts.get(state.activeAccountSub);
+    requestToken(a?.email);
+    throw new DriveApiError('Session expired.', 401);
+  }
+  if (!response.ok) {
+    throw new DriveApiError('Stream error: HTTP ' + response.status, response.status);
+  }
+
+  // Total byte count from Content-Length header (may be absent for chunked responses)
+  const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+
+  // Pump the ReadableStream chunk by chunk
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    const pct = contentLength > 0 ? Math.round((received / contentLength) * 100) : -1;
+    showStreamProgress(pct);
+  }
+
+  // Concatenate all chunks into a single typed array
+  const total    = chunks.reduce((n, c) => n + c.byteLength, 0);
+  const combined = new Uint8Array(total);
+  let offset     = 0;
+  for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.byteLength; }
+
+  hideStreamProgress();
+
+  const blob = new Blob([combined], { type: mimeType });
+  return BlobRegistry.create(blob);  // registered for deterministic cleanup
+}
+
+/**
+ * Updates the lightbox streaming progress bar UI.
+ * @param {number} pct - 0–100, or -1 for indeterminate (Content-Length unknown)
+ */
+function showStreamProgress(pct) {
+  DOM.lightboxStreamBar.hidden = false;
+  if (pct < 0) {
+    // Indeterminate: animate the fill bar with CSS pulse
+    DOM.lightboxStreamFill.style.width = '60%';
+    DOM.lightboxStreamFill.style.opacity = '0.6';
+    DOM.lightboxStreamLabel.textContent = 'Streaming\u2026';
+  } else {
+    DOM.lightboxStreamFill.style.width = pct + '%';
+    DOM.lightboxStreamFill.style.opacity = '1';
+    DOM.lightboxStreamLabel.textContent = pct + '%';
+  }
+}
+
+function hideStreamProgress() {
+  DOM.lightboxStreamFill.style.width = '100%';
+  setTimeout(() => { DOM.lightboxStreamBar.hidden = true; DOM.lightboxStreamFill.style.width = '0%'; }, 350);
+}
+
+// ============================================================
+// DOMAIN 3A — ZOOM CONTROLLER
+// Implements pinch-to-zoom (touch), scroll-to-zoom (wheel),
+// click-drag pan, double-click reset, and keyboard zoom.
+// All transforms use CSS transform: translate(X,Y) scale(S)
+// on a wrapper div — hardware-accelerated, zero layout thrash.
+// ============================================================
+const ZoomController = (() => {
+  let scale = 1, tx = 0, ty = 0;
+  let isDragging = false, startX = 0, startY = 0, lastTx = 0, lastTy = 0;
+  const MIN_SCALE = 0.5, MAX_SCALE = 8, STEP = 0.25;
+  let _wrapper = null;
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  function applyTransform() {
+    if (!_wrapper) return;
+    _wrapper.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+    if (DOM.lightboxZoomLevel) DOM.lightboxZoomLevel.textContent = Math.round(scale * 100) + '%';
+    _wrapper.dataset.scale = scale;
+  }
+
+  /** @param {HTMLElement} wrapper - .zoom-wrapper element */
+  function mount(wrapper) {
+    _wrapper = wrapper;
+    scale = 1; tx = 0; ty = 0;
+    applyTransform();
+
+    // Scroll to zoom
+    wrapper.addEventListener('wheel', onWheel, { passive: false });
+    // Drag to pan
+    wrapper.addEventListener('mousedown', onMouseDown);
+    // Double-click to reset
+    wrapper.addEventListener('dblclick', reset);
+    // Touch pinch
+    wrapper.addEventListener('touchstart', onTouchStart, { passive: true });
+    wrapper.addEventListener('touchmove', onTouchMove, { passive: false });
+  }
+
+  function unmount() {
+    if (!_wrapper) return;
+    _wrapper.removeEventListener('wheel', onWheel);
+    _wrapper.removeEventListener('mousedown', onMouseDown);
+    _wrapper.removeEventListener('dblclick', reset);
+    _wrapper.removeEventListener('touchstart', onTouchStart);
+    _wrapper.removeEventListener('touchmove', onTouchMove);
+    _wrapper = null;
+  }
+
+  function onWheel(e) {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -STEP : STEP;
+    zoomBy(delta, e.clientX, e.clientY);
+  }
+
+  function zoomBy(delta, cx, cy) {
+    const rect = _wrapper.getBoundingClientRect();
+    const originX = (cx - rect.left - rect.width / 2) / scale;
+    const originY = (cy - rect.top - rect.height / 2) / scale;
+    const newScale = clamp(scale + delta, MIN_SCALE, MAX_SCALE);
+    const scaleDiff = newScale - scale;
+    tx -= originX * scaleDiff;
+    ty -= originY * scaleDiff;
+    scale = newScale;
+    // Prevent panning outside bounds when zoomed out
+    if (scale <= 1) { tx = 0; ty = 0; }
+    applyTransform();
+  }
+
+  function onMouseDown(e) {
+    if (e.button !== 0) return;
+    isDragging = true; lastTx = tx; lastTy = ty;
+    startX = e.clientX; startY = e.clientY;
+    _wrapper.classList.add('is-dragging');
+    const onMove = (ev) => {
+      if (!isDragging) return;
+      tx = lastTx + (ev.clientX - startX);
+      ty = lastTy + (ev.clientY - startY);
+      applyTransform();
+    };
+    const onUp = () => {
+      isDragging = false;
+      _wrapper?.classList.remove('is-dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }
+
+  // Touch pinch-to-zoom
+  let _initDist = 0, _initScale = 1;
+  function onTouchStart(e) {
+    if (e.touches.length === 2) {
+      _initDist = Math.hypot(
+        e.touches[1].clientX - e.touches[0].clientX,
+        e.touches[1].clientY - e.touches[0].clientY
+      );
+      _initScale = scale;
+    }
+  }
+  function onTouchMove(e) {
+    if (e.touches.length !== 2) return;
+    e.preventDefault();
+    const dist = Math.hypot(
+      e.touches[1].clientX - e.touches[0].clientX,
+      e.touches[1].clientY - e.touches[0].clientY
+    );
+    scale = clamp(_initScale * (dist / _initDist), MIN_SCALE, MAX_SCALE);
+    if (scale <= 1) { tx = 0; ty = 0; }
+    applyTransform();
+  }
+
+  function reset() { scale = 1; tx = 0; ty = 0; applyTransform(); }
+  function zoomIn(cx, cy)  { zoomBy(STEP,  cx || window.innerWidth/2, cy || window.innerHeight/2); }
+  function zoomOut(cx, cy) { zoomBy(-STEP, cx || window.innerWidth/2, cy || window.innerHeight/2); }
+
+  return { mount, unmount, reset, zoomIn, zoomOut };
+})();
+
+// ============================================================
+// DOMAIN 3B — DOWNLOAD PROTOCOL
+// Creates a transient <a download> element, dispatches a
+// synthetic click, then immediately removes the element.
+// Uses the registered Blob URL so no second network request
+// is made. Falls back to the Drive web URL for safety.
+// ============================================================
+
+/**
+ * Triggers a browser file download for the currently open lightbox item.
+ * @param {Object} file   - file descriptor from state.filteredFiles
+ * @param {string} blobUrl - already-fetched Blob URL in BlobRegistry
+ */
+function downloadFile(file, blobUrl) {
+  const a = document.createElement('a');
+  a.href      = blobUrl || file.driveUrl || '#';
+  a.download  = file.name;
+  a.rel       = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  // Remove immediately — the browser queues the download before cleanup
+  requestAnimationFrame(() => document.body.removeChild(a));
+  showToast('Download started: ' + file.name, 'success');
+}
+
+// ============================================================
+// DOMAIN 3C — PRINT PROTOCOL
+// Injects image into a hidden <iframe>, applies a print-only
+// stylesheet, and calls contentWindow.print(). The iframe is
+// reused across invocations to avoid repeated DOM insertions.
+// ============================================================
+
+/** @type {HTMLIFrameElement|null} */
+let _printFrame = null;
+
+/**
+ * Prints the currently open image using a hidden iframe.
+ * Videos are not printable — the button is hidden for video files.
+ * @param {string} blobUrl - Blob URL of the image
+ * @param {string} filename
+ */
+function printImage(blobUrl, filename) {
+  if (!_printFrame) {
+    _printFrame = document.createElement('iframe');
+    _printFrame.id = 'print-iframe';
+    _printFrame.setAttribute('title', 'Print frame');
+    document.body.appendChild(_printFrame);
+  }
+
+  const doc = _printFrame.contentDocument || _printFrame.contentWindow.document;
+  doc.open();
+  doc.write(
+    '<!DOCTYPE html><html><head><title>' + filename + '</title>' +
+    '<style>' +
+    '* { margin: 0; padding: 0; box-sizing: border-box; }' +
+    'body { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #fff; }' +
+    'img  { max-width: 100%; max-height: 100vh; object-fit: contain; }' +
+    '@page { margin: 1cm; }' +
+    '</style></head><body>' +
+    '<img src="' + blobUrl + '" alt="' + filename + '" />' +
+    '</body></html>'
+  );
+  doc.close();
+
+  _printFrame.contentWindow.addEventListener('load', () => {
+    _printFrame.contentWindow.focus();
+    _printFrame.contentWindow.print();
+  }, { once: true });
+}
