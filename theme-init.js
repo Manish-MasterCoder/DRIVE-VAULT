@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @fileoverview theme-init.js
  * FOUC Prevention — Theme Bootstrap Script.
  *
