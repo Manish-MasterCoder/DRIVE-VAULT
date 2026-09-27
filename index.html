@@ -1,0 +1,271 @@
+﻿<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <!-- THEME FOUC PREVENTION: external same-origin script (CSP-compliant, no hash needed) -->
+  <script src="theme-init.js"></script>
+  
+  <!-- SVG favicon: eliminates favicon.ico 404 -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%2314b8a6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M12 2L2 7l10 5 10-5-10-5z' fill='url(%23g)'/%3E%3Cpath d='M2 17l10 5 10-5M2 12l10 5 10-5' stroke='url(%23g)' stroke-width='1.5' stroke-linecap='round' fill='none'/%3E%3C/svg%3E" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DriveVault — Multi-Account Media Manager</title>
+  <meta name="description" content="A secure, multi-tenant Google Drive media browser. Stream videos and images directly from your Drive accounts." />
+  <!--
+    CONTENT SECURITY POLICY  (Corrected — CSP Error Resolution)
+    ============================================================
+    script-src  'self'        : covers theme-init.js + app.js (same-origin files)
+    style-src   'unsafe-inline': REQUIRED by Google Identity Services (GIS).
+                               GIS injects dynamic <style> elements at runtime;
+                               no hash is computable for runtime-generated CSS.
+                               Style injection risk is far lower than script injection.
+    connect-src localhost:55xx : DEV ONLY (Chrome DevTools + Live Server).
+                               REMOVE before deploying to production.
+    GOOGLE CLOUD CONSOLE — API KEY RESTRICTION (REQUIRED):
+      1. APIs & Services -> Credentials -> [Your API Key]
+      2. Application restrictions -> HTTP referrers -> add your domain
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/client https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com http://127.0.0.1:5500 http://localhost:5500; img-src 'self' data: blob: https://lh3.googleusercontent.com https://*.googleusercontent.com; media-src blob: https://www.googleapis.com; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none';" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <a href="#media-grid" class="skip-link">Skip to media grid</a>
+
+  <div id="app-shell" class="app-shell" role="application" aria-label="DriveVault Media Manager">
+
+    <!-- SIDEBAR -->
+    <aside id="sidebar" class="sidebar" role="complementary" aria-label="Account and folder navigation">
+
+      <div class="brand" aria-label="DriveVault">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+          <path d="M12 2L2 7l10 5 10-5-10-5z" fill="url(#gi1)"/>
+          <path d="M2 17l10 5 10-5M2 12l10 5 10-5" stroke="url(#gi2)" stroke-width="1.5" stroke-linecap="round"/>
+          <defs>
+            <linearGradient id="gi1" x1="2" y1="7" x2="22" y2="7" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#6366f1"/><stop offset="1" stop-color="#14b8a6"/>
+            </linearGradient>
+            <linearGradient id="gi2" x1="2" y1="12" x2="22" y2="17" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#6366f1"/><stop offset="1" stop-color="#14b8a6"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <span class="brand-name">DriveVault</span>
+      </div>
+
+      <section class="sidebar-section" aria-labelledby="accts-hd">
+        <h2 class="sidebar-heading" id="accts-hd">Accounts</h2>
+        <ul id="account-list" class="account-list" role="listbox" aria-label="Connected Google accounts"></ul>
+        <button id="btn-add-account" class="btn btn-ghost btn-add-account" type="button" aria-label="Connect a new Google account">
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+            <circle cx="10" cy="10" r="9" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M10 6v8M6 10h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          Add Account
+        </button>
+      </section>
+
+      <section class="sidebar-section sidebar-section--grow" aria-labelledby="folders-hd">
+        <h2 class="sidebar-heading" id="folders-hd">Folders</h2>
+        <nav id="breadcrumb" class="breadcrumb" aria-label="Folder breadcrumb">
+          <ol id="breadcrumb-list" class="breadcrumb-list"></ol>
+        </nav>
+        <ul id="folder-tree" class="folder-tree" role="tree" aria-label="Drive folder tree"></ul>
+      </section>
+
+      <footer class="sidebar-footer">
+        <div id="quota-display" class="quota-display" aria-live="polite" aria-label="Storage quota"></div>
+        <button id="btn-sign-out-all" class="btn btn-ghost btn-sign-out" type="button" aria-label="Sign out of all accounts" hidden>Sign out all</button>
+      </footer>
+    </aside>
+
+    <!-- MAIN PANEL -->
+    <main id="main-panel" class="main-panel" role="main">
+
+      <header id="toolbar" class="toolbar" role="banner" aria-label="Media toolbar">
+        <div class="toolbar-left">
+          <h1 class="toolbar-title" id="current-folder-title">My Drive</h1>
+          <span id="media-count" class="media-count" aria-live="polite"></span>
+        </div>
+        <div class="toolbar-center">
+          <div class="search-wrapper" role="search">
+            <label for="search-input" class="sr-only">Search media files</label>
+            <svg class="search-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <circle cx="9" cy="9" r="6" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M13.5 13.5l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <input id="search-input" type="search" class="search-input" placeholder="Search media…" autocomplete="off" spellcheck="false" aria-controls="media-grid" />
+            <button id="btn-search-clear" class="btn-search-clear" type="button" aria-label="Clear search" hidden>&#x2715;</button>
+          </div>
+        </div>
+        <div class="toolbar-right">
+          <label for="sort-select" class="sr-only">Sort by</label>
+          <select id="sort-select" class="select-sort" aria-label="Sort media by">
+            <option value="modifiedTime:desc">Modified &#x2193;</option>
+            <option value="modifiedTime:asc">Modified &#x2191;</option>
+            <option value="name:asc">Name A&#x2013;Z</option>
+            <option value="name:desc">Name Z&#x2013;A</option>
+            <option value="size:desc">Size &#x2193;</option>
+          </select>
+          <div class="view-toggle" role="group" aria-label="View mode">
+            <button id="btn-grid-view" class="btn btn-icon btn-view active" type="button" aria-pressed="true" aria-label="Grid view" data-view="grid">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <rect x="2" y="2" width="7" height="7" rx="1" fill="currentColor"/>
+                <rect x="11" y="2" width="7" height="7" rx="1" fill="currentColor"/>
+                <rect x="2" y="11" width="7" height="7" rx="1" fill="currentColor"/>
+                <rect x="11" y="11" width="7" height="7" rx="1" fill="currentColor"/>
+              </svg>
+            </button>
+            <button id="btn-list-view" class="btn btn-icon btn-view" type="button" aria-pressed="false" aria-label="List view" data-view="list">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <rect x="2" y="3" width="16" height="2.5" rx="1" fill="currentColor"/>
+                <rect x="2" y="8.75" width="16" height="2.5" rx="1" fill="currentColor"/>
+                <rect x="2" y="14.5" width="16" height="2.5" rx="1" fill="currentColor"/>
+              </svg>
+            </button>
+          </div>
+          <div class="filter-chips" role="group" aria-label="Filter by media type">
+            <button class="chip chip--active" data-filter="all" type="button" aria-pressed="true">All</button>
+            <button class="chip" data-filter="video" type="button" aria-pressed="false">Video</button>
+            <button class="chip" data-filter="image" type="button" aria-pressed="false">Image</button>
+          <button
+            id="btn-theme-toggle"
+            class="btn btn-icon btn-theme-toggle"
+            type="button"
+            aria-label="Switch to light theme"
+            title="Toggle theme"
+          >
+            <!-- Sun icon (shown in dark mode) -->
+            <svg class="icon-sun" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <circle cx="10" cy="10" r="3.5" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.22 4.22l1.42 1.42M14.36 14.36l1.42 1.42M4.22 15.78l1.42-1.42M14.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <!-- Moon icon (shown in light mode) -->
+            <svg class="icon-moon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M17 12.5A7 7 0 117.5 3a5.5 5.5 0 009.5 9.5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          </div>
+        </div>
+      </header>
+
+      <!-- State: Auth Gate -->
+      <section id="state-auth" class="state-screen" aria-live="polite" aria-label="Authentication required">
+        <div class="state-inner">
+          <svg class="state-icon" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <circle cx="32" cy="32" r="30" stroke="url(#gs1)" stroke-width="1.5"/>
+            <path d="M32 18a10 10 0 100 20 10 10 0 000-20z" fill="url(#gs1)"/>
+            <path d="M14 50c0-9.94 8.06-18 18-18s18 8.06 18 18" stroke="url(#gs2)" stroke-width="1.5" stroke-linecap="round"/>
+            <defs>
+              <linearGradient id="gs1" x1="2" y1="2" x2="62" y2="62" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#6366f1"/><stop offset="1" stop-color="#14b8a6"/>
+              </linearGradient>
+              <linearGradient id="gs2" x1="14" y1="32" x2="50" y2="50" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#6366f1"/><stop offset="1" stop-color="#14b8a6"/>
+              </linearGradient>
+            </defs>
+          </svg>
+          <h2 class="state-title">Connect Your Drive</h2>
+          <p class="state-body">Sign in with Google to browse and stream your media files securely.</p>
+          <button id="btn-auth-primary" class="btn btn-primary btn-auth" type="button">
+            <svg class="google-logo" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/>
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+            </svg>
+            Sign in with Google
+          </button>
+        </div>
+      </section>
+
+      <!-- State: Loading -->
+      <section id="state-loading" class="state-screen" aria-live="polite" aria-label="Loading" hidden>
+        <div class="state-inner">
+          <div class="loader" role="status" aria-label="Loading media files">
+            <div class="loader-ring"></div>
+            <div class="loader-ring loader-ring--delay1"></div>
+            <div class="loader-ring loader-ring--delay2"></div>
+          </div>
+          <p id="loading-message" class="state-body">Loading media&hellip;</p>
+        </div>
+      </section>
+
+      <!-- State: Empty -->
+      <section id="state-empty" class="state-screen" aria-live="polite" aria-label="No media found" hidden>
+        <div class="state-inner">
+          <svg class="state-icon state-icon--muted" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <rect x="8" y="14" width="48" height="36" rx="4" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M22 32l8-8 5 5 4-4 3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="22" cy="26" r="2.5" fill="currentColor"/>
+          </svg>
+          <h2 class="state-title">No Media Here</h2>
+          <p class="state-body">This folder contains no video or image files. Try a different folder or account.</p>
+        </div>
+      </section>
+
+      <!-- State: Error -->
+      <section id="state-error" class="state-screen" aria-live="assertive" aria-label="Error" hidden>
+        <div class="state-inner">
+          <svg class="state-icon state-icon--error" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <circle cx="32" cy="32" r="30" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M32 20v16M32 42v2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <h2 class="state-title">Something Went Wrong</h2>
+          <p id="error-message" class="state-body"></p>
+          <button id="btn-retry" class="btn btn-primary" type="button">Retry</button>
+        </div>
+      </section>
+
+      <!-- Media Grid -->
+      <section id="media-grid-wrapper" class="media-grid-wrapper" aria-label="Media files" hidden>
+        <ul id="media-grid" class="media-grid" role="list" aria-label="Media files grid"></ul>
+        <div id="load-more-sentinel" class="load-more-sentinel" aria-hidden="true"></div>
+        <div id="load-more-spinner" class="load-more-spinner" hidden aria-live="polite" aria-label="Loading more">
+          <div class="spinner-sm"></div>
+          <span>Loading more&hellip;</span>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- LIGHTBOX -->
+  <div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="Media viewer" aria-hidden="true" hidden>
+    <div class="lightbox-backdrop" id="lightbox-backdrop" aria-hidden="true"></div>
+    <div class="lightbox-container" role="document">
+      <button id="btn-lightbox-close" class="btn btn-icon lightbox-close" type="button" aria-label="Close media viewer">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button id="btn-lightbox-prev" class="btn btn-icon lightbox-nav lightbox-nav--prev" type="button" aria-label="Previous media">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M12 4l-6 6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button id="btn-lightbox-next" class="btn btn-icon lightbox-nav lightbox-nav--next" type="button" aria-label="Next media">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M8 4l6 6-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <div class="lightbox-stage" id="lightbox-stage"></div>
+      <footer class="lightbox-info" id="lightbox-info">
+        <div class="lightbox-meta">
+          <span id="lightbox-filename" class="lightbox-filename"></span>
+          <span id="lightbox-details" class="lightbox-details"></span>
+        </div>
+        <a id="lightbox-open-drive" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener noreferrer" aria-label="Open file in Google Drive">Open in Drive &#x2197;</a>
+      </footer>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <div id="toast-container" class="toast-container" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <script src="app.js" defer></script>
+</body>
+</html>
+
