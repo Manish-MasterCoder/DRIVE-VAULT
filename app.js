@@ -13,8 +13,8 @@
 'use strict';
 
 const CONFIG = Object.freeze({
-  CLIENT_ID: '207970775721-5n6naqcusi9c9npmtap8uhulpp8vru0q.apps.googleusercontent.com',
-  API_KEY: 'AIzaSyAlgeO1AGMi-hc17YpgLAVJzgjyc9JwRKU',
+  CLIENT_ID: '207970775721-vuvundo4o5sdiqbvjj7ebprn88bt8die.apps.googleusercontent.com',
+  API_KEY: 'AIzaSyAIFywynSWVspVWfiBe3qxxD0k8VfjWV6M',
   DRIVE_API: 'https://www.googleapis.com/drive/v3',
   SCOPES: 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile',
   MEDIA_MIME_TYPES: new Set([
