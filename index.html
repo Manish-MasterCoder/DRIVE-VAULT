@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -24,7 +24,7 @@
       1. APIs & Services -> Credentials -> [Your API Key]
       2. Application restrictions -> HTTP referrers -> add your domain
   -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/client https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com; img-src 'self' data: blob: https://lh3.googleusercontent.com https://*.googleusercontent.com; media-src blob: https://www.googleapis.com; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://accounts.google.com/gsi/client https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com http://127.0.0.1:5500 http://localhost:5500; img-src 'self' data: blob: https://lh3.googleusercontent.com https://*.googleusercontent.com; media-src blob: https://www.googleapis.com; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none';" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" />
@@ -250,13 +250,51 @@
           <path d="M8 4l6 6-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
+      <!-- Streaming progress bar -->
+      <div id="lightbox-stream-bar" class="lightbox-stream-bar" hidden aria-hidden="true">
+        <div id="lightbox-stream-fill" class="lightbox-stream-fill"></div>
+        <span id="lightbox-stream-label" class="lightbox-stream-label">0%</span>
+      </div>
+
       <div class="lightbox-stage" id="lightbox-stage"></div>
+
       <footer class="lightbox-info" id="lightbox-info">
         <div class="lightbox-meta">
           <span id="lightbox-filename" class="lightbox-filename"></span>
           <span id="lightbox-details" class="lightbox-details"></span>
         </div>
-        <a id="lightbox-open-drive" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener noreferrer" aria-label="Open file in Google Drive">Open in Drive &#x2197;</a>
+
+        <!-- Action toolbar: zoom + download + print + open in Drive -->
+        <div class="lightbox-actions" role="toolbar" aria-label="Media actions">
+          <!-- Zoom controls (images only) -->
+          <div id="lightbox-zoom-controls" class="zoom-controls" hidden>
+            <button id="btn-zoom-out" class="btn btn-icon btn-sm" type="button" aria-label="Zoom out" title="Zoom out (-)">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="9" cy="9" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M6 9h6M15 15l-3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <span id="lightbox-zoom-level" class="zoom-level" aria-live="polite" aria-label="Zoom level">100%</span>
+            <button id="btn-zoom-in" class="btn btn-icon btn-sm" type="button" aria-label="Zoom in" title="Zoom in (+)">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="9" cy="9" r="6" stroke="currentColor" stroke-width="1.5"/><path d="M6 9h6M9 6v6M15 15l-3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <button id="btn-zoom-reset" class="btn btn-icon btn-sm" type="button" aria-label="Reset zoom" title="Reset zoom (0)">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10a6 6 0 1 0 .5-2.5M4 4v4h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+
+          <div class="lightbox-actions-right">
+            <a id="lightbox-open-drive" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener noreferrer" aria-label="Open in Google Drive" title="Open in Google Drive">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M11 3h6v6M10 10L17 3M8 5H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="btn-label">Drive</span>
+            </a>
+            <button id="btn-lightbox-print" class="btn btn-ghost btn-sm" type="button" aria-label="Print image" title="Print image">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 7V3h10v4M5 13H3a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><rect x="5" y="11" width="10" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/></svg>
+              <span class="btn-label">Print</span>
+            </button>
+            <button id="btn-lightbox-download" class="btn btn-primary btn-sm" type="button" aria-label="Download file" title="Download file (D)">
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 3v10M6 9l4 4 4-4M4 16h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="btn-label">Download</span>
+            </button>
+          </div>
+        </div>
       </footer>
     </div>
   </div>
