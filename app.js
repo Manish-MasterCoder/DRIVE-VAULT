@@ -474,7 +474,10 @@ function renderQuota(q) {
 }
 
 // LIGHTBOX
-let _preLightboxFocus = null;
+// Module-level variables that track state across the open/close lifecycle.
+// Both are reset on closeLightbox() — they must never outlive a session.
+let _preLightboxFocus = null;  // Element to return focus to on close
+let _currentBlobUrl   = '';    // Active Blob URL — registered in BlobRegistry for cleanup
 
 async function openLightboxAt(idx) {
   if (idx < 0 || idx >= state.filteredFiles.length) return;
